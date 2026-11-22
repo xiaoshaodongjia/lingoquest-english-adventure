@@ -51,9 +51,111 @@ const safeId = value => typeof value === 'string' && value.length > 0 && value.l
 const count = value => typeof value === 'number' && Number.isFinite(value)
   ? Math.max(0, Math.min(10000, Math.floor(value))) : 0;
 const clockTime = value => isTimestamp(value) ? value : Date.now();
-const dayOf = time => reviewDayFormatter.format(new Date(time));
+const dayOf = time => {
+  const parts = Object.fromEntries(reviewDayFormatter.formatToParts(new Date(time)).map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
 const starsOf = record => Math.max(1, Math.min(3, Math.max(count(record?.stars), count(record?.bestStars))));
 const zoneOf = lesson => lesson?.zoneId ?? lesson?.zone;
+const orderOf = lesson => Number.isInteger(lesson?.order) && lesson.order >= 0 ? lesson.order : 0;
+
+function validDateKey(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const parsed = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value;
+}
+
+function sanitizeDailyPlan(value, knownId, save) {
+  if (!isRecord(value) || !validDateKey(value.date) || !isTimestamp(value.createdAt)
+    || dayOf(value.createdAt) !== value.date || !Array.isArray(value.tasks)) return null;
+  const tasks = [];
+  const used = new Set();
+  let lessonCount = 0;
+  let reviewCount = 0;
+  for (const task of value.tasks) {
+    if (!isRecord(task) || !knownId(task.lessonId) || !['lesson', 'review'].includes(task.type)
+      || !isTimestamp(task.plannedAt) || task.plannedAt < value.createdAt || dayOf(task.plannedAt) !== value.date) continue;
+    const completed = save.completed[task.lessonId];
+    if (task.type === 'review') {
+      const review = save.reviews[task.lessonId];
+      const reviewedAfterPlanning = isTimestamp(review?.lastReviewedAt)
+        && review.lastReviewedAt >= task.plannedAt && dayOf(review.lastReviewedAt) === value.date;
+      if (!completed || !review || (review.dueAt > task.plannedAt && !reviewedAfterPlanning)) continue;
+    } else if (task.isReplay === true ? !completed || completed.completedAt > task.plannedAt
+      : completed && completed.completedAt < task.plannedAt) continue;
+    const id = `${task.type}:${task.lessonId}`;
+    if (used.has(id) || (task.type === 'lesson' ? lessonCount >= 1 : reviewCount >= 2)) continue;
+    const isReplay = task.type === 'lesson' && task.isReplay === true;
+    // Older daily saves did not have a baseline. Preserve later genuine replays,
+    // while a completion at the exact planning millisecond is not another replay.
+    const baselineCompletedAt = isReplay
+      ? isTimestamp(task.baselineCompletedAt) && task.baselineCompletedAt <= completed.lastCompletedAt
+        ? task.baselineCompletedAt : Math.min(completed.lastCompletedAt, task.plannedAt)
+      : null;
+    tasks.push({
+      id,
+      lessonId: task.lessonId,
+      type: task.type,
+      isReplay,
+      plannedAt: task.plannedAt,
+      ...(isReplay ? { baselineCompletedAt } : {}),
+    });
+    used.add(id);
+    if (task.type === 'lesson') lessonCount += 1;
+    else reviewCount += 1;
+  }
+  return { date: value.date, createdAt: value.createdAt, tasks };
+}
+
+function uniqueLessons(lessons) {
+  const used = new Set();
+  return (Array.isArray(lessons) ? lessons : []).filter(lesson => {
+    if (!isRecord(lesson) || !safeId(lesson.id) || used.has(lesson.id)) return false;
+    used.add(lesson.id);
+    return true;
+  });
+}
+
+function completionTime(task, save, date, now) {
+  const completed = save.completed[task.lessonId];
+  const time = task.type === 'review' ? save.reviews[task.lessonId]?.lastReviewedAt
+    : task.isReplay ? completed?.lastCompletedAt : completed?.completedAt;
+  if (task.isReplay && (!isTimestamp(task.baselineCompletedAt) || time <= task.baselineCompletedAt)) return null;
+  return isTimestamp(time) && time >= task.plannedAt && time <= now && dayOf(time) === date ? time : null;
+}
+
+function recommendedLessons(lessons, save) {
+  const selectedMode = MODES.find(mode => mode.id === save.profile.mode) || MODES[0];
+  const zones = [...new Set([...selectedMode.recommendedZones, ...lessons.map(zoneOf)])];
+  const rank = new Map(zones.map((id, index) => [id, index]));
+  return [...lessons].sort((left, right) => rank.get(zoneOf(left)) - rank.get(zoneOf(right))
+    || orderOf(left) - orderOf(right) || left.id.localeCompare(right.id));
+}
+
+function chooseLesson(lessons, save, preferRecent, reviewIds) {
+  const sorted = recommendedLessons(lessons, save);
+  const startOrder = save.profile.level === 'stretch' ? 2 : save.profile.level === 'basic' ? 1 : 0;
+  const available = sorted.filter(lesson => !own(save.completed, lesson.id)
+    && isLessonUnlocked(lesson, lessons, save));
+  const preferred = available.filter(lesson => orderOf(lesson) >= startOrder);
+  const recent = lessons.find(lesson => lesson.id === save.recentLessonId);
+  if (preferRecent && recent) {
+    if (available.some(lesson => lesson.id === recent.id)) return { lesson: recent, isReplay: false };
+    const nextInZone = preferred.find(lesson => zoneOf(lesson) === zoneOf(recent)
+      && orderOf(lesson) > orderOf(recent));
+    const sameZone = preferred.find(lesson => zoneOf(lesson) === zoneOf(recent));
+    if (nextInZone || sameZone) return { lesson: nextInZone || sameZone, isReplay: false };
+  }
+  if (available.length) return { lesson: preferred[0] || available[0], isReplay: false };
+
+  // Offer a familiar full lesson only when every known lesson has been completed.
+  if (!lessons.length || !lessons.every(lesson => own(save.completed, lesson.id))) return null;
+  const withoutReviews = sorted.filter(lesson => !reviewIds.has(lesson.id));
+  const pool = withoutReviews.length ? withoutReviews : sorted;
+  const replay = (preferRecent && pool.find(lesson => lesson.id === recent?.id))
+    || pool.find(lesson => orderOf(lesson) >= startOrder) || pool[0];
+  return { lesson: replay, isReplay: true };
+}
 
 export function createSave(now = Date.now()) {
   return {
@@ -82,12 +184,15 @@ export function sanitizeSave(value, lessonIds = []) {
     for (const [id, completed] of Object.entries(value.completed)) {
       if (!knownId(id) || !isRecord(completed) || !isTimestamp(completed.completedAt)) continue;
       const stars = starsOf(completed);
+      const lastCompletedAt = isTimestamp(completed.lastCompletedAt)
+        ? Math.max(completed.completedAt, completed.lastCompletedAt) : completed.completedAt;
       clean.completed[id] = {
         stars,
         bestStars: stars,
         completedAt: completed.completedAt,
+        lastCompletedAt,
         lastPlayedAt: isTimestamp(completed.lastPlayedAt)
-          ? Math.max(completed.completedAt, completed.lastPlayedAt) : completed.completedAt,
+          ? Math.max(lastCompletedAt, completed.lastPlayedAt) : lastCompletedAt,
       };
     }
   }
@@ -104,6 +209,8 @@ export function sanitizeSave(value, lessonIds = []) {
   }
 
   clean.recentLessonId = knownId(value.recentLessonId) ? value.recentLessonId : null;
+  const dailyPlan = sanitizeDailyPlan(value.dailyPlan, knownId, clean);
+  if (dailyPlan) clean.dailyPlan = dailyPlan;
   return clean;
 }
 
@@ -136,6 +243,7 @@ export function completeLesson(save, lesson, session = {}, now = Date.now()) {
     stars,
     bestStars: stars,
     completedAt: previous?.completedAt ?? time,
+    lastCompletedAt: Math.max(time, previous?.lastCompletedAt ?? time),
     lastPlayedAt: Math.max(time, previous?.lastPlayedAt ?? time),
   };
   if (!own(next.reviews, lesson.id)) {
@@ -186,6 +294,113 @@ export function getDueReviews(save, now = Date.now()) {
       && isRecord(review) && isTimestamp(review.dueAt) && review.dueAt <= time)
     .sort(([leftId, left], [rightId, right]) => left.dueAt - right.dueAt || leftId.localeCompare(rightId))
     .map(([id]) => id);
+}
+
+/** Keep a gentle daily plan fixed until Shanghai midnight or an explicit preference refresh. */
+export function ensureDailyPlan(save, lessons, now = Date.now(), options = {}) {
+  const time = clockTime(now);
+  const date = dayOf(time);
+  const catalog = uniqueLessons(lessons);
+  const knownIds = new Set(catalog.map(lesson => lesson.id));
+  const next = sanitizeSave(save, [...knownIds]);
+  const previous = next.dailyPlan?.date === date ? next.dailyPlan : null;
+  const refresh = options?.refresh === true;
+  const invalidTarget = previous?.tasks.some(task => !knownIds.has(task.lessonId)
+    || (task.type === 'lesson' && completionTime(task, next, date, time) === null
+      && !isLessonUnlocked(catalog.find(lesson => lesson.id === task.lessonId), catalog, next)));
+  if (previous && !refresh && !invalidTarget) {
+    const replay = previous.tasks.find(task => task.type === 'lesson' && task.isReplay);
+    if (replay) {
+      // Repair older plans with duplicate pending work without replacing their other targets.
+      next.dailyPlan = {
+        ...previous,
+        tasks: previous.tasks.filter(task => task.type !== 'review' || task.lessonId !== replay.lessonId
+          || completionTime(task, next, date, time) !== null),
+      };
+    }
+    return next;
+  }
+
+  const completedTasks = previous?.tasks.filter(task => knownIds.has(task.lessonId)
+    && completionTime(task, next, date, time) !== null) || [];
+  const originalTasks = new Map((previous?.tasks || []).map(task => [task.id, task]));
+  const makeTask = (type, lessonId, isReplay = false) => {
+    const id = `${type}:${lessonId}`;
+    const original = originalTasks.get(id);
+    return original && original.isReplay === isReplay ? original
+      : {
+        id, lessonId, type, isReplay, plannedAt: time,
+        ...(isReplay ? { baselineCompletedAt: next.completed[lessonId].lastCompletedAt } : {}),
+      };
+  };
+  const reviews = completedTasks.filter(task => task.type === 'review');
+  const reviewIds = new Set(reviews.map(task => task.lessonId));
+  const dueIds = getDueReviews(next, time).filter(id => knownIds.has(id));
+  const preferredReviewIds = new Set([...reviewIds,
+    ...dueIds.filter(id => !reviewIds.has(id)).slice(0, 2 - reviews.length)]);
+  let lessonTask = completedTasks.find(task => task.type === 'lesson');
+  if (!lessonTask) {
+    const selected = chooseLesson(catalog, next, !refresh, preferredReviewIds);
+    if (selected && !(selected.isReplay && reviewIds.has(selected.lesson.id))) {
+      lessonTask = makeTask('lesson', selected.lesson.id, selected.isReplay);
+    }
+  }
+  for (const id of dueIds) {
+    if (reviews.length >= 2) break;
+    if (reviewIds.has(id) || (lessonTask?.isReplay && id === lessonTask.lessonId)) continue;
+    reviews.push(makeTask('review', id));
+    reviewIds.add(id);
+  }
+  next.dailyPlan = {
+    date,
+    createdAt: previous?.createdAt ?? time,
+    tasks: [...(lessonTask ? [lessonTask] : []), ...reviews],
+  };
+  return next;
+}
+
+/** Read only; callers ensure and persist the plan before rendering it. */
+export function getDailyProgress(save, lessons, now = Date.now()) {
+  const time = clockTime(now);
+  const date = dayOf(time);
+  const catalog = uniqueLessons(lessons);
+  const knownIds = new Set(catalog.map(lesson => lesson.id));
+  const clean = sanitizeSave(save, [...knownIds]);
+  const current = clean.dailyPlan?.date === date ? clean.dailyPlan : null;
+  const tasks = (current?.tasks || []).filter(task => knownIds.has(task.lessonId)).map(task => {
+    const completedAt = completionTime(task, clean, date, time);
+    return { ...task, done: completedAt !== null, completedAt };
+  });
+  const completedCount = tasks.filter(task => task.done).length;
+  return {
+    date,
+    tasks,
+    completedCount,
+    totalCount: tasks.length,
+    isComplete: tasks.length > 0 && completedCount === tasks.length,
+    needsPlan: current === null,
+  };
+}
+
+/** Summaries describe recorded activity, not a proficiency or pronunciation score. */
+export function getLearningSummary(save, lessons, now = Date.now()) {
+  const time = clockTime(now);
+  const date = dayOf(time);
+  const catalog = uniqueLessons(lessons);
+  const clean = sanitizeSave(save, catalog.map(lesson => lesson.id));
+  const completed = catalog.filter(lesson => own(clean.completed, lesson.id));
+  const zones = [...new Set(catalog.map(zoneOf).filter(id => typeof id === 'string' && id))];
+  const onDate = value => isTimestamp(value) && value <= time && dayOf(value) === date;
+  return {
+    completedLessons: completed.length,
+    totalLessons: catalog.length,
+    collectedPhrases: new Set(completed.map(lesson => normalizeAnswer(lesson.phrase)).filter(Boolean)).size,
+    successfulReviews: completed.reduce((sum, lesson) => sum + clean.reviews[lesson.id].successfulReviews, 0),
+    completedZones: zones.filter(id => catalog.filter(lesson => zoneOf(lesson) === id)
+      .every(lesson => own(clean.completed, lesson.id))).length,
+    learnedToday: completed.filter(lesson => onDate(clean.completed[lesson.id].completedAt)).length,
+    reviewedToday: completed.filter(lesson => onDate(clean.reviews[lesson.id].lastReviewedAt)).length,
+  };
 }
 
 /** Keep word boundaries: "can not" must not collapse into "cannot". */
