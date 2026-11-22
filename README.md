@@ -2,11 +2,14 @@
 
 一个可以直接玩的英语闯关网页原型。玩家选择喜欢的场景，完成理解、拼句和自主表达三个短任务，收集星星并继续探索；之后在回忆营地重新使用旧句子。
 
+在线体验：[英语探险岛](https://xiaoshaodongjia.github.io/lingoquest-english-adventure/)。
+
 ## 启动
 
 需要 Node.js 20 或更新版本，无需安装依赖。
 
 ```bash
+git clone https://github.com/xiaoshaodongjia/lingoquest-english-adventure.git
 cd lingoquest-english-adventure
 npm run dev
 ```
