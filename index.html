@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f7f8f0" />
+  <meta name="description" content="英语探险岛：以生活情景闯关、拼句和自主表达，让英语学习成为一个个小冒险。" />
+  <title>LingoQuest · 英语探险岛</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="styles.css" />
+  <script type="module" src="app.js"></script>
+</head>
+<body data-mode="explore">
+  <a class="skip-link" href="#main-view">跳到学习内容</a>
+  <div class="app-shell">
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="英语探险岛首页">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 36 36"><path fill="currentColor" d="M18 2 33 11v16l-15 8L3 27V11z"/><path fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="m12 12 14 5-14 6 3-8 8 3M12 12l3 3"/></svg></span>
+        <span><span class="brand-name">LingoQuest<span class="brand-dot">.</span></span><span class="brand-subtitle">英语探险岛</span></span>
+      </a>
+      <nav class="main-nav" aria-label="主要导航">
+        <button class="nav-link" type="button" data-action="navigate" data-page="map" aria-current="page">冒险地图</button>
+        <button class="nav-link" type="button" data-action="navigate" data-page="review">回忆营地<span id="review-badge" hidden></span></button>
+        <button class="nav-link" type="button" data-action="navigate" data-page="notebook">表达手册</button>
+      </nav>
+      <div class="header-actions">
+        <span class="progress-pill" id="header-stars" aria-label="已获得的星星"></span>
+        <button class="icon-button" type="button" data-action="toggle-sound" id="sound-toggle" aria-label="关闭朗读"></button>
+        <button class="profile-button" type="button" data-action="settings" id="profile-toggle" aria-label="调整学习方式"></button>
+      </div>
+    </header>
+    <main id="main-view"></main>
+    <footer class="site-footer"><span>一点点表达，一站站抵达。</span><span>LingoQuest · 可玩原型</span></footer>
+  </div>
+  <dialog id="lesson-dialog" class="game-dialog" aria-labelledby="game-title"></dialog>
+  <dialog id="reward-dialog" class="reward-dialog" aria-labelledby="reward-title"></dialog>
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title"></dialog>
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+</body>
+</html>
